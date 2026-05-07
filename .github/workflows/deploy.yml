@@ -1,38 +1,77 @@
 name: Deploy to AWS Lambda
-
+ 
 on:
   push:
     branches: [main]
-
+ 
+env:
+  AWS_REGION:    ap-northeast-2
+  RUNTIME:       python3.11
+  ARCHITECTURE:  x86_64
+  RECEIVER_NAME: pocket-dev-agent-message-receiver
+ 
 jobs:
+  # ── Receiver Lambda 배포 ──────────────────────────────────────
   deploy-receiver:
     name: Deploy Receiver Lambda
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+ 
     steps:
       - uses: actions/checkout@v4
-
+ 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region:     ${{ secrets.AWS_REGION }}
-
+          aws-region: ${{ env.AWS_REGION }}
+ 
       - name: Zip receiver
+        run: zip receiver.zip receiver_lambda.py
+ 
+      - name: Create or update receiver Lambda
         run: |
-          zip receiver.zip receiver_lambda.py
-
-      - name: Deploy receiver to Lambda
+          STATUS=$(aws lambda get-function \
+            --function-name $RECEIVER_NAME \
+            --query 'Configuration.FunctionName' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+ 
+          if [ "$STATUS" = "NOT_FOUND" ]; then
+            echo "Creating receiver Lambda for the first time..."
+            aws lambda create-function \
+              --function-name  $RECEIVER_NAME \
+              --runtime        $RUNTIME \
+              --architectures  $ARCHITECTURE \
+              --role           ${{ secrets.LAMBDA_EXECUTION_ROLE_ARN }} \
+              --handler        receiver_lambda.lambda_handler \
+              --zip-file       fileb://receiver.zip \
+              --timeout        10 \
+              --memory-size    128 \
+              --description    "Slack 이벤트 수신 및 Worker 비동기 호출" \
+              --region         $AWS_REGION
+ 
+            aws lambda wait function-active --function-name $RECEIVER_NAME
+          else
+            echo "Updating existing receiver Lambda code..."
+            aws lambda update-function-code \
+              --function-name $RECEIVER_NAME \
+              --zip-file      fileb://receiver.zip \
+              --region        $AWS_REGION
+ 
+            aws lambda wait function-updated --function-name $RECEIVER_NAME
+          fi
+ 
+      - name: Update receiver environment variables
         run: |
-          aws lambda update-function-code \
-            --function-name claude-deploy-agent-receiver \
-            --zip-file fileb://receiver.zip \
-            --region $AWS_REGION
-
-          # Receiver는 환경변수 2개만 필요
           aws lambda update-function-configuration \
-            --function-name claude-deploy-agent-receiver \
-            --region $AWS_REGION \
-            --environment "Variables={ \
-              SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}, \
-              WORKER_FUNCTION_NAME=claude-deploy-agent-worker \
+            --function-name $RECEIVER_NAME \
+            --region        $AWS_REGION \
+            --environment   "Variables={
+              SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }},
+              WORKER_FUNCTION_NAME=${{ env.WORKER_NAME }}
             }"
+ 
+          aws lambda wait function-updated --function-name $RECEIVER_NAME
+          echo "✅ Receiver deployed"
