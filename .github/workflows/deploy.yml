@@ -14,6 +14,7 @@ jobs:
   deploy-receiver:
     name: Deploy Receiver Lambda
     runs-on: ubuntu-latest
+    environment: dev
     permissions:
       id-token: write
       contents: read
