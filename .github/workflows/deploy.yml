@@ -11,15 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+
       - name: Zip receiver
         run: |
           zip receiver.zip receiver_lambda.py
 
       - name: Deploy receiver to Lambda
-        env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION:            ${{ secrets.AWS_REGION }}
         run: |
           aws lambda update-function-code \
             --function-name claude-deploy-agent-receiver \
@@ -33,38 +35,4 @@ jobs:
             --environment "Variables={ \
               SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }}, \
               WORKER_FUNCTION_NAME=claude-deploy-agent-worker \
-            }"
-
-  deploy-worker:
-    name: Deploy Worker Lambda
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Zip worker
-        run: |
-          zip worker.zip worker_lambda.py
-
-      - name: Deploy worker to Lambda
-        env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_REGION:            ${{ secrets.AWS_REGION }}
-        run: |
-          aws lambda update-function-code \
-            --function-name claude-deploy-agent-worker \
-            --zip-file fileb://worker.zip \
-            --region $AWS_REGION
-
-          # Worker는 환경변수 5개 필요
-          aws lambda update-function-configuration \
-            --function-name claude-deploy-agent-worker \
-            --region $AWS_REGION \
-            --timeout 120 \
-            --environment "Variables={ \
-              ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}, \
-              GITHUB_TOKEN=${{ secrets.GH_TOKEN_FINE_GRAINED }}, \
-              GITHUB_REPO=${{ secrets.GITHUB_REPO }}, \
-              GITHUB_BRANCH=main, \
-              SLACK_BOT_TOKEN=${{ secrets.SLACK_BOT_TOKEN }} \
             }"
