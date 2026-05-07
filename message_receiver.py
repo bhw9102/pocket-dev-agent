@@ -9,7 +9,7 @@ import base64
 
 # ── 환경변수 ──────────────────────────────────────────
 ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-GITHUB_TOKEN        = os.environ.get("GITHUB_TOKEN_FINE_GRAINED", "")
+GITHUB_TOKEN        = os.environ.get("GH_TOKEN_FINE_GRAINED", "")
 GITHUB_REPO         = os.environ.get("GITHUB_REPO", "your-id/your-repo")  # "owner/repo"
 GITHUB_BRANCH       = os.environ.get("GITHUB_BRANCH", "main")
 SLACK_BOT_TOKEN     = os.environ.get("SLACK_BOT_TOKEN", "")
