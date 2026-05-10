@@ -71,7 +71,7 @@ jobs:
             --function-name $RECEIVER_NAME \
             --region        $AWS_REGION \
             --environment   "Variables={
-              SLACK_SIGNING_SECRET=${{ secrets.SLACK_SIGNING_SECRET }},
+              SLACK_SIGNING_SECRET=${{ var.SLACK_SIGNING_SECRET }},
               WORKER_FUNCTION_NAME=${{ env.WORKER_NAME }}
             }"
  
