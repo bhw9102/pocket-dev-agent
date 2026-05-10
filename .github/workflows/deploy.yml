@@ -146,8 +146,7 @@ jobs:
             --memory-size   256 \
             --environment   "Variables={
               ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},
-              GH_TOKEN_FINE_GRAINED=${{ secrets.GH_TOKEN_FINE_GRAINED }},
-              GITHUB_REPO=${{ vars.GITHUB_REPO }},
+              GITHUB_REPO=${{ vars.GH_REPO }},
               GITHUB_BRANCH=main,
               SLACK_WEBHOOK_URL=${{ vars.SLACK_WEBHOOK_URL }}
             }"
