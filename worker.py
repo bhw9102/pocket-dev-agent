@@ -17,7 +17,7 @@ TARGET_FILES = os.environ.get("TARGET_FILES", "")
 
 # AWS Secrets Manager secret 이름
 GITHUB_SECRET_NAME = "pocket-dev-agent-github-token-fine-grained-pocket-dev-agent"
-ANTHROPIC_SECRET_NAME = os.environ.get("ANTHROPIC_SECRET_NAME", "pocket-dev-agent-anthropic-api-key")
+ANTHROPIC_SECRET_NAME = "pocket-dev-agent-anthropic-secret-key"
 
 # Claude 모델
 CLAUDE_MODEL = "claude-opus-4-5"
