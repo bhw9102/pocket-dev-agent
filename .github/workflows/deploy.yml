@@ -46,7 +46,7 @@ jobs:
               --function-name  $RECEIVER_NAME \
               --runtime        $RUNTIME \
               --architectures  $ARCHITECTURE \
-              --role           ${{ secrets.LAMBDA_EXECUTION_ROLE_ARN }} \
+              --role           ${{ vars.LAMBDA_EXECUTION_ROLE_ARN }} \
               --handler        receiver_lambda.lambda_handler \
               --zip-file       fileb://receiver.zip \
               --timeout        10 \
