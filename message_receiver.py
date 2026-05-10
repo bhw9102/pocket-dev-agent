@@ -8,9 +8,9 @@ import boto3
 from botocore.exceptions import ClientError
 
 # ── 환경변수 ──────────────────────────────────────────
-WORKER_FUNCTION_NAME = os.environ.get("WORKER_FUNCTION_NAME", "pocket-deve-agent-worker")
+WORKER_FUNCTION_NAME = os.environ.get("WORKER_FUNCTION_NAME", "pocket-dev-agent-worker")
 SLACK_WEBHOOK_URL    = os.environ.get("SLACK_WEBHOOK_URL", "")
-DEDUP_TABLE_NAME     = os.environ.get("DEDUP_TABLE_NAME", "slack-event-dedup")
+DEDUP_TABLE_NAME     = os.environ.get("DEDUP_TABLE_NAME", "pocket-dev-agent-slack-event-dedup")
 
 # ── DynamoDB ──────────────────────────────────────────
 dynamodb = boto3.resource("dynamodb", region_name="ap-northeast-2")
