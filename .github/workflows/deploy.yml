@@ -48,7 +48,7 @@ jobs:
               --runtime        $RUNTIME \
               --architectures  $ARCHITECTURE \
               --role           ${{ vars.LAMBDA_EXECUTION_ROLE_ARN }} \
-              --handler        receiver_lambda.lambda_handler \
+              --handler        message_receiver.lambda_handler \
               --zip-file       fileb://receiver.zip \
               --timeout        10 \
               --memory-size    128 \
