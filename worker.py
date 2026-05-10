@@ -4,15 +4,53 @@ import re
 import urllib.request
 import urllib.error
 import base64
+import boto3
 
 # ── 환경변수 ──────────────────────────────────────────
-GITHUB_TOKEN      = os.environ.get("GH_TOKEN_FINE_GRAINED", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO", "your-id/your-repo")
 GITHUB_BRANCH     = os.environ.get("GITHUB_BRANCH", "main")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
 
-# 횟수를 기록할 파일 경로 (레포 안에 있어야 함)
+# AWS Secrets Manager secret 이름
+GITHUB_SECRET_NAME = "pocket-dev-agent-github-token-fine-grained-pocket-dev-agent"
+
+# 횟수를 기록할 파일 경로
 COUNTER_FILE = "worker_receive_count.txt"
+
+# Lambda 실행 중 토큰 캐싱 (cold start 시에만 Secrets Manager 호출)
+_github_token_cache: str | None = None
+
+
+def get_github_token() -> str:
+    """AWS Secrets Manager에서 GitHub 토큰을 가져옴. 캐싱 적용."""
+    global _github_token_cache
+    if _github_token_cache:
+        print("[INFO] Using cached GitHub token")
+        return _github_token_cache
+
+    print(f"[INFO] Fetching secret: {GITHUB_SECRET_NAME}")
+    client = boto3.client("secretsmanager", region_name="ap-northeast-2")
+    response = client.get_secret_value(SecretId=GITHUB_SECRET_NAME)
+
+    # Secrets Manager는 문자열 또는 JSON으로 저장 가능
+    # 문자열로 저장했으면 그대로, JSON이면 파싱
+    secret = response["SecretString"]
+    try:
+        parsed = json.loads(secret)
+        # JSON인 경우 키 이름 후보들 시도
+        token = (
+            parsed.get("token")
+            or parsed.get("github_token")
+            or parsed.get("GH_TOKEN_FINE_GRAINED")
+            or list(parsed.values())[0]  # 키 이름 무관하게 첫 번째 값
+        )
+    except (json.JSONDecodeError, IndexError):
+        # 순수 문자열로 저장된 경우
+        token = secret.strip()
+
+    _github_token_cache = token
+    print("[INFO] GitHub token fetched from Secrets Manager")
+    return token
 
 
 def slack_webhook_post(text: str) -> None:
@@ -34,9 +72,10 @@ def slack_webhook_post(text: str) -> None:
 
 def github_request(method: str, path: str, data: dict = None) -> dict:
     """GitHub REST API 호출"""
+    token = get_github_token()
     url = f"https://api.github.com{path}"
     headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
         "Content-Type": "application/json",
         "User-Agent": "pocket-dev-agent",
@@ -50,7 +89,7 @@ def github_request(method: str, path: str, data: dict = None) -> dict:
         raise RuntimeError(f"GitHub API error {e.code}: {e.read().decode()}")
 
 
-def get_file(filepath: str) -> tuple[str, str]:
+def get_file(filepath: str) -> tuple[str | None, str | None]:
     """GitHub에서 파일 내용과 sha 반환. 파일 없으면 (None, None) 반환"""
     try:
         data = github_request("GET", f"/repos/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}")
@@ -74,7 +113,7 @@ def commit_file(filepath: str, new_content: str, sha: str | None, commit_message
         "branch": GITHUB_BRANCH,
     }
     if sha:
-        payload["sha"] = sha  # 기존 파일 업데이트 시 필요
+        payload["sha"] = sha
 
     result = github_request("PUT", f"/repos/{GITHUB_REPO}/contents/{filepath}", payload)
     commit_url = result["commit"]["html_url"]
@@ -94,10 +133,8 @@ def lambda_handler(event: dict, context) -> None:
         content, sha = get_file(COUNTER_FILE)
 
         if content is None:
-            # 파일이 없으면 1로 시작
             count = 1
         else:
-            # "워커에서 메세지를 수신했습니다. (N회)" 에서 N 추출
             match = re.search(r"\((\d+)회\)", content)
             count = int(match.group(1)) + 1 if match else 1
 
