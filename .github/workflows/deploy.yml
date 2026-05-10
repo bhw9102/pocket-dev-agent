@@ -72,8 +72,9 @@ jobs:
             --function-name $RECEIVER_NAME \
             --region        $AWS_REGION \
             --environment   "Variables={
-              SLACK_SIGNING_SECRET=\"${{ vars.SLACK_SIGNING_SECRET }}\",
-              WORKER_FUNCTION_NAME=\"${{ env.WORKER_NAME }}\"
+              SLACK_SIGNING_SECRET=${{ vars.SLACK_SIGNING_SECRET }},
+              WORKER_FUNCTION_NAME=${{ env.WORKER_NAME }},
+              SLACK_WEBHOOK_URL=${{ vars.SLACK_WEBHOOK_URL }}
             }"
  
           aws lambda wait function-updated --function-name $RECEIVER_NAME
