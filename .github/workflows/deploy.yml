@@ -10,7 +10,7 @@ env:
   RUNTIME:       python3.11
   ARCHITECTURE:  x86_64
   RECEIVER_NAME: pocket-dev-agent-message-receiver
-  WORKER_NAME:   pocket-deve-agent-worker
+  WORKER_NAME:   pocket-dev-agent-worker
 
 jobs:
   # ── Receiver Lambda 배포 ──────────────────────────────────────
