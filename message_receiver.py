@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import time
 import urllib.request
+import boto3
 
 # ── 환경변수 ──────────────────────────────────────────
 WORKER_FUNCTION_NAME = os.environ.get("WORKER_FUNCTION_NAME", "pocket-deve-agent-worker")
@@ -11,10 +12,7 @@ SLACK_WEBHOOK_URL    = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 
 def verify_slack_signature(headers: dict, body: str) -> bool:
-    """
-    Slack 요청이 진짜인지 서명 검증.
-    SLACK_SIGNING_SECRET 환경변수 필요.
-    """
+    """Slack 요청 서명 검증"""
     signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
     if not signing_secret:
         print("[WARN] SLACK_SIGNING_SECRET not set, skipping verification")
@@ -27,7 +25,6 @@ def verify_slack_signature(headers: dict, body: str) -> bool:
         print("[WARN] Missing timestamp or signature headers")
         return False
 
-    # 5분 이상 지난 요청은 리플레이 공격으로 간주
     try:
         if abs(time.time() - int(timestamp)) > 300:
             print("[WARN] Request timestamp too old")
@@ -63,30 +60,18 @@ def slack_webhook_post(text: str) -> None:
         print(f"[INFO] Slack webhook response: {resp.status}")
 
 
-# def invoke_worker_async(payload: dict) -> None:
-#     """
-#     Worker Lambda를 비동기(Event) 방식으로 호출.
-#     ※ 테스트 중 비활성화
-#     """
-#     import boto3
-#     client = boto3.client("lambda")
-#     client.invoke(
-#         FunctionName=WORKER_FUNCTION_NAME,
-#         InvocationType="Event",
-#         Payload=json.dumps(payload).encode("utf-8"),
-#     )
-#     print(f"[INFO] Worker invoked async: {WORKER_FUNCTION_NAME}")
+def invoke_worker_async(payload: dict) -> None:
+    """Worker Lambda를 비동기(Event) 방식으로 호출"""
+    client = boto3.client("lambda")
+    client.invoke(
+        FunctionName=WORKER_FUNCTION_NAME,
+        InvocationType="Event",
+        Payload=json.dumps(payload).encode("utf-8"),
+    )
+    print(f"[INFO] Worker invoked async: {WORKER_FUNCTION_NAME}")
 
 
 def lambda_handler(event: dict, context) -> dict:
-    """
-    Receiver Lambda 진입점.
-
-    현재 모드: 테스트
-      1. Slack 서명 검증
-      2. URL Verification 챌린지 처리
-      3. app_mention 수신 시 Webhook으로 직접 응답 (Worker 호출 비활성화)
-    """
     # --- HTTP body 파싱 ---
     raw_body = event.get("body", "") or ""
     headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
@@ -135,18 +120,18 @@ def lambda_handler(event: dict, context) -> dict:
             event_id = body.get("event_id", "")
             print(f"[INFO] app_mention received, event_id={event_id}, text={text}")
 
-            # ── 테스트: Worker 대신 Webhook으로 직접 응답 ──
-            slack_webhook_post(f"✅ Receiver 정상 동작 확인!\n수신 메시지: {text}")
+            # 1. 수신 알림 발송
+            slack_webhook_post("📨 리시버에서 메세지를 수신했습니다.")
 
-            # ── 운영 전환 시 아래 주석 해제 + 위 webhook_post 제거 ──
-            # worker_payload = {
-            #     "event_id": event_id,
-            #     "channel": inner_event.get("channel", ""),
-            #     "user": inner_event.get("user", ""),
-            #     "text": text,
-            #     "ts": inner_event.get("ts", ""),
-            # }
-            # invoke_worker_async(worker_payload)
+            # 2. Worker 비동기 호출
+            worker_payload = {
+                "event_id": event_id,
+                "channel": inner_event.get("channel", ""),
+                "user": inner_event.get("user", ""),
+                "text": text,
+                "ts": inner_event.get("ts", ""),
+            }
+            invoke_worker_async(worker_payload)
 
         else:
             print(f"[INFO] Unhandled event type: {event_type}")
