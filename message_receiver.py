@@ -1,207 +1,155 @@
 import json
 import os
-import re
-import boto3
+import hashlib
+import hmac
+import time
 import urllib.request
-import urllib.parse
-import urllib.error
-import base64
 
 # ── 환경변수 ──────────────────────────────────────────
-ANTHROPIC_API_KEY   = os.environ.get("ANTHROPIC_API_KEY", "")
-GITHUB_TOKEN        = os.environ.get("GH_TOKEN_FINE_GRAINED", "")
-GITHUB_REPO         = os.environ.get("GITHUB_REPO", "your-id/your-repo")  # "owner/repo"
-GITHUB_BRANCH       = os.environ.get("GITHUB_BRANCH", "main")
-SLACK_BOT_TOKEN     = os.environ.get("SLACK_BOT_TOKEN", "")
+WORKER_FUNCTION_NAME = os.environ.get("WORKER_FUNCTION_NAME", "pocket-deve-agent-worker")
+SLACK_WEBHOOK_URL    = os.environ.get("SLACK_WEBHOOK_URL", "")
 
 
-# ── GitHub API 헬퍼 ───────────────────────────────────
+def verify_slack_signature(headers: dict, body: str) -> bool:
+    """
+    Slack 요청이 진짜인지 서명 검증.
+    SLACK_SIGNING_SECRET 환경변수 필요.
+    """
+    signing_secret = os.environ.get("SLACK_SIGNING_SECRET", "")
+    if not signing_secret:
+        print("[WARN] SLACK_SIGNING_SECRET not set, skipping verification")
+        return True
 
-def github_request(method: str, path: str, data: dict = None) -> dict:
-    """GitHub REST API 호출 (requests 없이 urllib 사용)"""
-    url = f"https://api.github.com{path}"
-    headers = {
-        "Authorization": f"token {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-        "User-Agent": "claude-deploy-agent",
-    }
-    body = json.dumps(data).encode("utf-8") if data else None
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    timestamp = headers.get("x-slack-request-timestamp", "")
+    slack_signature = headers.get("x-slack-signature", "")
+
+    if not timestamp or not slack_signature:
+        print("[WARN] Missing timestamp or signature headers")
+        return False
+
+    # 5분 이상 지난 요청은 리플레이 공격으로 간주
     try:
-        with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        error_body = e.read().decode("utf-8")
-        raise RuntimeError(f"GitHub API error {e.code}: {error_body}")
+        if abs(time.time() - int(timestamp)) > 300:
+            print("[WARN] Request timestamp too old")
+            return False
+    except ValueError:
+        print("[WARN] Invalid timestamp format")
+        return False
+
+    sig_basestring = f"v0:{timestamp}:{body}"
+    computed = "v0=" + hmac.new(
+        signing_secret.encode("utf-8"),
+        sig_basestring.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+
+    return hmac.compare_digest(computed, slack_signature)
 
 
-def get_file(filepath: str) -> tuple[str, str]:
-    """
-    GitHub에서 파일 내용과 sha를 반환.
-    sha는 파일 업데이트 시 필요.
-    """
-    data = github_request("GET", f"/repos/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}")
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    sha = data["sha"]
-    print(f"[INFO] Read file: {filepath} (sha={sha[:7]})")
-    return content, sha
+def slack_webhook_post(text: str) -> None:
+    """Webhook URL로 Slack에 메시지 전송"""
+    if not SLACK_WEBHOOK_URL:
+        print("[WARN] SLACK_WEBHOOK_URL not set")
+        return
 
-
-def commit_file(filepath: str, new_content: str, sha: str, commit_message: str) -> str:
-    """
-    GitHub에 파일을 커밋. 커밋 URL 반환.
-    """
-    encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
-    result = github_request("PUT", f"/repos/{GITHUB_REPO}/contents/{filepath}", {
-        "message": commit_message,
-        "content": encoded,
-        "sha": sha,
-        "branch": GITHUB_BRANCH,
-    })
-    commit_url = result["commit"]["html_url"]
-    print(f"[INFO] Committed: {commit_url}")
-    return commit_url
-
-
-def list_python_files(directory: str = "") -> list[str]:
-    """
-    레포의 Python 파일 목록 반환 (Claude가 어떤 파일이 있는지 알 수 있게).
-    """
-    path = f"/repos/{GITHUB_REPO}/contents/{directory}?ref={GITHUB_BRANCH}"
-    items = github_request("GET", path)
-    return [
-        item["path"] for item in items
-        if item["type"] == "file" and item["name"].endswith(".py")
-    ]
-
-
-# ── Claude API 헬퍼 ───────────────────────────────────
-
-def call_claude(user_request: str, current_code: str, filepath: str) -> str:
-    """
-    Claude API 호출. 수정된 코드만 반환하도록 프롬프트 설계.
-    """
-    system_prompt = """너는 Python 코드를 수정하는 전문 에이전트야.
-규칙:
-1. 수정된 전체 Python 코드만 반환해. 설명, 마크다운 코드블록(```), 주석 없이.
-2. 요청한 부분만 최소한으로 수정해. 나머지 코드는 그대로 유지해.
-3. 코드 품질(타입힌트, 에러핸들링)은 유지하거나 개선해."""
-
-    user_prompt = f"""파일: {filepath}
-
-요청: {user_request}
-
-현재 코드:
-{current_code}
-
-수정된 전체 코드를 반환해줘."""
-
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 4096,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["content"][0]["text"].strip()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Claude API error {e.code}: {e.read().decode()}")
-
-
-# ── Slack 메시지 전송 ─────────────────────────────────
-
-def slack_post(channel: str, text: str) -> None:
-    """Slack 채널에 메시지 전송"""
-    url = "https://slack.com/api/chat.postMessage"
-    headers = {
-        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-        "Content-Type": "application/json",
-    }
-    payload = json.dumps({"channel": channel, "text": text}).encode("utf-8")
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    payload = json.dumps({"text": text}).encode("utf-8")
+    req = urllib.request.Request(
+        SLACK_WEBHOOK_URL,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
     with urllib.request.urlopen(req) as resp:
-        result = json.loads(resp.read().decode("utf-8"))
-        if not result.get("ok"):
-            print(f"[WARN] Slack post failed: {result.get('error')}")
+        print(f"[INFO] Slack webhook response: {resp.status}")
 
 
-def parse_target_file(text: str) -> str | None:
+# def invoke_worker_async(payload: dict) -> None:
+#     """
+#     Worker Lambda를 비동기(Event) 방식으로 호출.
+#     ※ 테스트 중 비활성화
+#     """
+#     import boto3
+#     client = boto3.client("lambda")
+#     client.invoke(
+#         FunctionName=WORKER_FUNCTION_NAME,
+#         InvocationType="Event",
+#         Payload=json.dumps(payload).encode("utf-8"),
+#     )
+#     print(f"[INFO] Worker invoked async: {WORKER_FUNCTION_NAME}")
+
+
+def lambda_handler(event: dict, context) -> dict:
     """
-    메시지에서 파일명 추출.
-    예: "handler.py의 timeout을 30초로 늘려줘" → "handler.py"
+    Receiver Lambda 진입점.
+
+    현재 모드: 테스트
+      1. Slack 서명 검증
+      2. URL Verification 챌린지 처리
+      3. app_mention 수신 시 Webhook으로 직접 응답 (Worker 호출 비활성화)
     """
-    match = re.search(r"([\w/]+\.py)", text)
-    return match.group(1) if match else None
+    # --- HTTP body 파싱 ---
+    raw_body = event.get("body", "") or ""
+    headers = {k.lower(): v for k, v in (event.get("headers") or {}).items()}
 
+    print(f"[INFO] Headers: {list(headers.keys())}")
+    print(f"[INFO] Body: {raw_body[:200]}")
 
-# ── Lambda 진입점 ─────────────────────────────────────
+    # --- Slack 서명 검증 ---
+    if not verify_slack_signature(headers, raw_body):
+        print("[ERROR] Slack signature verification failed")
+        return {"statusCode": 403, "body": "Forbidden"}
 
-def lambda_handler(event: dict, context) -> None:
-    """
-    Worker Lambda 진입점.
-    Receiver Lambda로부터 비동기 호출됨.
+    print("[INFO] Signature verified OK")
 
-    event 구조:
-      {
-        "event_id": "Ev...",
-        "channel":  "C...",
-        "user":     "U...",
-        "text":     "@claude-bot handler.py timeout 30초로 늘려줘",
-        "ts":       "1234567890.123456"
-      }
-    """
-    channel = event.get("channel", "")
-    raw_text = event.get("text", "")
-
-    # 멘션 제거: "<@U12345> handler.py ..." → "handler.py ..."
-    user_request = re.sub(r"<@[A-Z0-9]+>\s*", "", raw_text).strip()
-
-    print(f"[INFO] Request: {user_request}")
-
+    # --- JSON 파싱 ---
     try:
-        # 1. 대상 파일 파악
-        target_file = parse_target_file(user_request)
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        print("[ERROR] Invalid JSON body")
+        return {"statusCode": 400, "body": "Bad Request"}
 
-        if not target_file:
-            # 파일명이 없으면 레포의 Python 파일 목록을 보여줌
-            py_files = list_python_files()
-            file_list = "\n".join(f"  • {f}" for f in py_files)
-            slack_post(channel, f"어떤 파일을 수정할까요?\n{file_list}\n\n예) `handler.py timeout 30초로 늘려줘`")
-            return
+    slack_event_type = body.get("type")
 
-        slack_post(channel, f"`{target_file}` 읽는 중...")
+    # --- URL Verification ---
+    if slack_event_type == "url_verification":
+        challenge = body.get("challenge", "")
+        print(f"[INFO] URL verification challenge: {challenge}")
+        return {
+            "statusCode": 200,
+            "headers": {"Content-Type": "text/plain"},
+            "body": challenge,
+        }
 
-        # 2. GitHub에서 현재 코드 읽기
-        current_code, sha = get_file(target_file)
+    # --- 일반 이벤트 처리 ---
+    if slack_event_type == "event_callback":
+        inner_event = body.get("event", {})
+        event_type = inner_event.get("type", "")
 
-        slack_post(channel, f"Claude가 수정 중...")
+        # bot 자신의 메시지 무시 (무한루프 방지)
+        if inner_event.get("bot_id"):
+            print("[INFO] Ignoring bot message")
+            return {"statusCode": 200, "body": "OK"}
 
-        # 3. Claude로 코드 수정
-        new_code = call_claude(user_request, current_code, target_file)
+        if event_type == "app_mention":
+            text = inner_event.get("text", "")
+            event_id = body.get("event_id", "")
+            print(f"[INFO] app_mention received, event_id={event_id}, text={text}")
 
-        # 4. GitHub에 커밋
-        commit_msg = f"fix: {user_request[:60]}"
-        commit_url = commit_file(target_file, new_code, sha, commit_msg)
+            # ── 테스트: Worker 대신 Webhook으로 직접 응답 ──
+            slack_webhook_post(f"✅ Receiver 정상 동작 확인!\n수신 메시지: {text}")
 
-        # 5. 완료 알림
-        slack_post(channel,
-            f"✅ 수정 완료!\n"
-            f"파일: `{target_file}`\n"
-            f"커밋: {commit_url}\n"
-            f"GitHub Actions가 Lambda 배포를 시작해요."
-        )
+            # ── 운영 전환 시 아래 주석 해제 + 위 webhook_post 제거 ──
+            # worker_payload = {
+            #     "event_id": event_id,
+            #     "channel": inner_event.get("channel", ""),
+            #     "user": inner_event.get("user", ""),
+            #     "text": text,
+            #     "ts": inner_event.get("ts", ""),
+            # }
+            # invoke_worker_async(worker_payload)
 
-    except Exception as e:
-        print(f"[ERROR] {e}")
-        slack_post(channel, f"❌ 오류가 발생했어요.\n```{str(e)}```")
+        else:
+            print(f"[INFO] Unhandled event type: {event_type}")
+
+    # --- Slack에 즉시 200 반환 ---
+    return {"statusCode": 200, "body": "OK"}
