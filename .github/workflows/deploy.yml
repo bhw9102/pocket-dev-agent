@@ -10,6 +10,7 @@ env:
   RUNTIME:       python3.11
   ARCHITECTURE:  x86_64
   RECEIVER_NAME: pocket-dev-agent-message-receiver
+  WORKER_NAME: pocket-deve-agent-worker
  
 jobs:
   # ── Receiver Lambda 배포 ──────────────────────────────────────
@@ -71,8 +72,8 @@ jobs:
             --function-name $RECEIVER_NAME \
             --region        $AWS_REGION \
             --environment   "Variables={
-              SLACK_SIGNING_SECRET=${{ vars.SLACK_SIGNING_SECRET }},
-              WORKER_FUNCTION_NAME=${{ env.WORKER_NAME }}
+              SLACK_SIGNING_SECRET=\"${{ vars.SLACK_SIGNING_SECRET }}\",
+              WORKER_FUNCTION_NAME=\"${{ env.WORKER_NAME }}\"
             }"
  
           aws lambda wait function-updated --function-name $RECEIVER_NAME
