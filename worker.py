@@ -6,11 +6,13 @@ import urllib.error
 import base64
 
 # ── 환경변수 ──────────────────────────────────────────
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 GITHUB_TOKEN      = os.environ.get("GH_TOKEN_FINE_GRAINED", "")
 GITHUB_REPO       = os.environ.get("GITHUB_REPO", "your-id/your-repo")
 GITHUB_BRANCH     = os.environ.get("GITHUB_BRANCH", "main")
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+
+# 횟수를 기록할 파일 경로 (레포 안에 있어야 함)
+COUNTER_FILE = "worker_receive_count.txt"
 
 
 def slack_webhook_post(text: str) -> None:
@@ -49,124 +51,74 @@ def github_request(method: str, path: str, data: dict = None) -> dict:
 
 
 def get_file(filepath: str) -> tuple[str, str]:
-    """GitHub에서 파일 내용과 sha 반환"""
-    data = github_request("GET", f"/repos/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}")
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    sha = data["sha"]
-    print(f"[INFO] Read file: {filepath} (sha={sha[:7]})")
-    return content, sha
+    """GitHub에서 파일 내용과 sha 반환. 파일 없으면 (None, None) 반환"""
+    try:
+        data = github_request("GET", f"/repos/{GITHUB_REPO}/contents/{filepath}?ref={GITHUB_BRANCH}")
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        sha = data["sha"]
+        print(f"[INFO] Read file: {filepath} (sha={sha[:7]})")
+        return content, sha
+    except RuntimeError as e:
+        if "404" in str(e):
+            print(f"[INFO] File not found, will create: {filepath}")
+            return None, None
+        raise
 
 
-def commit_file(filepath: str, new_content: str, sha: str, commit_message: str) -> str:
-    """GitHub에 파일 커밋. 커밋 URL 반환"""
+def commit_file(filepath: str, new_content: str, sha: str | None, commit_message: str) -> str:
+    """GitHub에 파일 커밋 (sha=None이면 신규 생성). 커밋 URL 반환"""
     encoded = base64.b64encode(new_content.encode("utf-8")).decode("utf-8")
-    result = github_request("PUT", f"/repos/{GITHUB_REPO}/contents/{filepath}", {
+    payload = {
         "message": commit_message,
         "content": encoded,
-        "sha": sha,
         "branch": GITHUB_BRANCH,
-    })
+    }
+    if sha:
+        payload["sha"] = sha  # 기존 파일 업데이트 시 필요
+
+    result = github_request("PUT", f"/repos/{GITHUB_REPO}/contents/{filepath}", payload)
     commit_url = result["commit"]["html_url"]
     print(f"[INFO] Committed: {commit_url}")
     return commit_url
 
 
-def list_python_files(directory: str = "") -> list[str]:
-    """레포의 Python 파일 목록 반환"""
-    path = f"/repos/{GITHUB_REPO}/contents/{directory}?ref={GITHUB_BRANCH}"
-    items = github_request("GET", path)
-    return [
-        item["path"] for item in items
-        if item["type"] == "file" and item["name"].endswith(".py")
-    ]
-
-
-def call_claude(user_request: str, current_code: str, filepath: str) -> str:
-    """Claude API 호출. 수정된 코드만 반환"""
-    system_prompt = """너는 Python 코드를 수정하는 전문 에이전트야.
-규칙:
-1. 수정된 전체 Python 코드만 반환해. 설명, 마크다운 코드블록(```), 주석 없이.
-2. 요청한 부분만 최소한으로 수정해. 나머지 코드는 그대로 유지해.
-3. 코드 품질(타입힌트, 에러핸들링)은 유지하거나 개선해."""
-
-    user_prompt = f"""파일: {filepath}
-
-요청: {user_request}
-
-현재 코드:
-{current_code}
-
-수정된 전체 코드를 반환해줘."""
-
-    url = "https://api.anthropic.com/v1/messages"
-    headers = {
-        "x-api-key": ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-    }
-    payload = {
-        "model": "claude-sonnet-4-6",
-        "max_tokens": 4096,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": user_prompt}],
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-            return result["content"][0]["text"].strip()
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"Claude API error {e.code}: {e.read().decode()}")
-
-
-def parse_target_file(text: str) -> str | None:
-    """메시지에서 파일명 추출"""
-    match = re.search(r"([\w/]+\.py)", text)
-    return match.group(1) if match else None
-
-
 def lambda_handler(event: dict, context) -> None:
     """
     Worker Lambda 진입점.
-    Receiver Lambda로부터 비동기 호출됨.
+    GitHub의 카운터 파일을 읽어 횟수를 +1하고 커밋.
     """
-    channel = event.get("channel", "")
-    raw_text = event.get("text", "")
+    print(f"[INFO] Event received: {json.dumps(event)}")
 
-    # 멘션 제거
-    user_request = re.sub(r"<@[A-Z0-9]+>\s*", "", raw_text).strip()
-    print(f"[INFO] Request: {user_request}")
+    try:
+        # 1. GitHub에서 카운터 파일 읽기
+        content, sha = get_file(COUNTER_FILE)
 
-    # ── 테스트: 수신 확인 메시지만 발송 ──
-    slack_webhook_post("🔧 워커에서 메세지를 수신했습니다.")
+        if content is None:
+            # 파일이 없으면 1로 시작
+            count = 1
+        else:
+            # "워커에서 메세지를 수신했습니다. (N회)" 에서 N 추출
+            match = re.search(r"\((\d+)회\)", content)
+            count = int(match.group(1)) + 1 if match else 1
 
-    # ── 운영 전환 시 아래 주석 해제 ──
-    # try:
-    #     target_file = parse_target_file(user_request)
-    #
-    #     if not target_file:
-    #         py_files = list_python_files()
-    #         file_list = "\n".join(f"  • {f}" for f in py_files)
-    #         slack_webhook_post(f"어떤 파일을 수정할까요?\n{file_list}\n\n예) `handler.py timeout 30초로 늘려줘`")
-    #         return
-    #
-    #     slack_webhook_post(f"`{target_file}` 읽는 중...")
-    #     current_code, sha = get_file(target_file)
-    #
-    #     slack_webhook_post("Claude가 수정 중...")
-    #     new_code = call_claude(user_request, current_code, target_file)
-    #
-    #     commit_msg = f"fix: {user_request[:60]}"
-    #     commit_url = commit_file(target_file, new_code, sha, commit_msg)
-    #
-    #     slack_webhook_post(
-    #         f"✅ 수정 완료!\n"
-    #         f"파일: `{target_file}`\n"
-    #         f"커밋: {commit_url}\n"
-    #         f"GitHub Actions가 Lambda 배포를 시작해요."
-    #     )
-    #
-    # except Exception as e:
-    #     print(f"[ERROR] {e}")
-    #     slack_webhook_post(f"❌ 오류가 발생했어요.\n```{str(e)}```")
+        # 2. 새 내용 구성
+        new_content = f"워커에서 메세지를 수신했습니다. ({count}회)\n"
+        print(f"[INFO] Updating counter to {count}")
+
+        # 3. GitHub에 커밋
+        commit_url = commit_file(
+            COUNTER_FILE,
+            new_content,
+            sha,
+            f"test: 워커 수신 횟수 {count}회 기록"
+        )
+
+        # 4. Slack에 결과 알림
+        slack_webhook_post(
+            f"🔧 워커에서 메세지를 수신했습니다. ({count}회)\n"
+            f"커밋: {commit_url}"
+        )
+
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        slack_webhook_post(f"❌ 워커 오류\n```{str(e)}```")
