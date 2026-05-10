@@ -29,7 +29,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
  
       - name: Zip receiver
-        run: zip receiver.zip receiver_lambda.py
+        run: zip receiver.zip message_receiver.py
  
       - name: Create or update receiver Lambda
         run: |
