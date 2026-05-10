@@ -82,3 +82,75 @@ jobs:
 
           aws lambda wait function-updated --function-name $RECEIVER_NAME
           echo "✅ Receiver deployed"
+
+  # ── Worker Lambda 배포 ────────────────────────────────────────
+  deploy-worker:
+    name: Deploy Worker Lambda
+    runs-on: ubuntu-latest
+    environment: dev
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Zip worker
+        run: zip worker.zip worker.py
+
+      - name: Create or update worker Lambda
+        run: |
+          STATUS=$(aws lambda get-function \
+            --function-name $WORKER_NAME \
+            --query 'Configuration.FunctionName' \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          if [ "$STATUS" = "NOT_FOUND" ]; then
+            echo "Creating worker Lambda for the first time..."
+            aws lambda create-function \
+              --function-name  $WORKER_NAME \
+              --runtime        $RUNTIME \
+              --architectures  $ARCHITECTURE \
+              --role           ${{ vars.LAMBDA_EXECUTION_ROLE_ARN }} \
+              --handler        worker.lambda_handler \
+              --zip-file       fileb://worker.zip \
+              --timeout        120 \
+              --memory-size    256 \
+              --description    "Claude API 호출 및 GitHub 코드 수정/커밋" \
+              --region         $AWS_REGION
+
+            aws lambda wait function-active --function-name $WORKER_NAME
+          else
+            echo "Updating existing worker Lambda code..."
+            aws lambda update-function-code \
+              --function-name $WORKER_NAME \
+              --zip-file      fileb://worker.zip \
+              --region        $AWS_REGION
+
+            aws lambda wait function-updated --function-name $WORKER_NAME
+          fi
+
+      - name: Update worker configuration and environment variables
+        run: |
+          aws lambda update-function-configuration \
+            --function-name $WORKER_NAME \
+            --region        $AWS_REGION \
+            --handler       worker.lambda_handler \
+            --timeout       120 \
+            --memory-size   256 \
+            --environment   "Variables={
+              ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }},
+              GH_TOKEN_FINE_GRAINED=${{ secrets.GH_TOKEN_FINE_GRAINED }},
+              GITHUB_REPO=${{ vars.GITHUB_REPO }},
+              GITHUB_BRANCH=main,
+              SLACK_WEBHOOK_URL=${{ vars.SLACK_WEBHOOK_URL }}
+            }"
+
+          aws lambda wait function-updated --function-name $WORKER_NAME
+          echo "✅ Worker deployed"
